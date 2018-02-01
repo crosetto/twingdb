@@ -1,0 +1,70 @@
+define c_break
+	   set schedule-multiple off
+	   break $arg0 : $arg1  if ($_inferior == 1)
+	   break $arg0 : $arg2  if ($_inferior == 2)
+end
+
+define c_run
+	   set schedule-multiple off
+	   inferior 1
+	   run&
+	   inferior 2
+	   run&
+end
+
+define c_i
+	   inferior 2
+	   interrupt
+	   inferior 1
+	   interrupt
+end
+
+define c_diff
+	   pi import re
+	   pi import compare
+	   inferior 2
+	   set $str2 = $arg0
+	   inferior 1
+	   set $str1 = $arg0
+	   pi str1 = re.sub(r"0x.[0-9a-f]*", r"address", str(gdb.parse_and_eval("$str1")))
+	   pi str2 = re.sub(r"0x.[0-9a-f]*", r"address", str(gdb.parse_and_eval("$str2")))
+   	   pi str3 = compare.diff(str1, str2)
+	   pi print str3
+end
+
+# c_compare_continue <file> <line1> <line2> <value to compare 1> <value to compare 2>
+define c_compare_continue
+	   pi import re
+	   set $cond=0
+	   set schedule-multiple off
+	   pi import compare
+	   pi import time
+
+	   inferior 2
+	   interrupt
+
+	   inferior 1
+
+	   break $arg0 : $arg1 if ($_inferior == 1)
+	   commands
+	       silent
+	       inferior 2
+		   c&
+		   inferion 1
+	   end
+
+	   break $arg0 : $arg2 if ($_inferior == 2)
+	   commands
+	       silent
+		   inferior 1
+	   	   set $str1 = __VALUE_1
+	   	   inferior 2
+	   	   set $str2 = __VALUE_2
+		   pi str1 = re.sub(r"0x.[0-9a-f]*", r"address", str(gdb.parse_and_eval("$str1")))
+		   pi str2 = re.sub(r"0x.[0-9a-f]*", r"address", str(gdb.parse_and_eval("$str2")))
+	   	   pi str3 = compare.diff(str1, str2)
+	   	   inferior 1
+	   	   pi if (str3 == "") : gdb.execute("c&")
+	   	   pi if (str3 != "") : print str3
+	    end
+end

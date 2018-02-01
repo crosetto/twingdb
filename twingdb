@@ -1,0 +1,298 @@
+#!/bin/bash
+
+#usage example:
+#./twingdb -e build/Aimsun82_Debug/bin/Aimsun\ Next -E "build/Aimsun_8_2/bin/Aimsun\ Next" -a  "-project ~/Documents/test.ang -target 2404 -cmd execute" -f CarFollowing.cxx -l  83 -L 80 -v '*pVarVeh' -V '*pVarVeh'
+#./twingdb -i 11111 -I 22222 -p ~/Documents/test.ang -a  "-project ~/Documents/test.ang -target 2404 -cmd execute" -f CarFollowing.cxx -l  83 -L 80 -v '*pVarVeh' -V '*pVarVeh'
+#./twingdb -e build/Aimsun82_Debug/bin/Aimsun\ Next -E "build/Aimsun_8_2/bin/Aimsun\ Next"
+
+HELP="bash script based on GDB for running two parallel execution of a program
+and stopping at the first difference. It runs GDB and extends it with the following commands:
+c_diff <arg1> : where arg1 is anything pritable in GDB prints the diff of arg1 in the
+	   two executions. If the difference is a memory address it is skipped
+c_break <file> <line1> <line2> sets a breakpoint at file:line1 for the
+		fist execution, at file:line2 for the seconf
+c_run runs both executions in parallel and asynchronously
+c_i interrupts the asynchrounous execution in both executables
+c_compare_continue  <file> <line1> <line2> <value1> <value2>
+		this is a deicate command, which is ran by default when all the arguments are
+		passed to the script: it sets a breakpoint at file:line1 fo the first program,
+		and at file:line2 for the second. When the the breakpoint is reached it
+		compares value1 from the first execution with value2 from the second one, and if the values
+		are the same it continues, otherwise it stops. The difference is computed without taking into
+		account memory addresses (which are obviously different in the two executions)
+
+Example of usage:
+./twingdb -e build/AimsunV1/bin/Aimsun\ Next \\
+			-E \"build/AimsunV2/bin/Aimsun\ Next\" \\
+			-a \"-project ~/Documents/test.ang -target 2404 -cmd execute\" \\
+			-f CarFollowing.cxx \\
+			-l  83 -L 80 -v '*pVarVeh' -V '*pVarVeh
+
+-e, -E: the two executables
+-a: the arguments passed to the executables
+-f: the file where to insert a breakpoint
+-l, -L: the lines for the breakpoint in the 2 processes
+-v, -V: the values to compare between the 2 executions
+
+this will execute two versions of Aimsun and stop whenever *pVarVeh in CarFollowing.cxx:83
+from the first execution is different from *pVarVeh in CarFollowing.cxx:80 in the second execution
+
+All the rest is plain old GDB, with two \"inferiors\" (i.e. processes). switch between inferior typing
+(gdb) inferior 1
+or
+(gdb) inferior 2
+always run \"continue\" from inferior 1.
+
+NOTE: the script is quite slow, especially if the breakpoint is met very often. it serializes the execution:
+	  switches between the two processes and execute them one at a time. It is also slow because it prints a
+	  bunch of useless information each time it reaches a breakpoint. I still have to find a way to remove that.
+	  In the meantime to speed it up a bit you can:
+	  -  redirect the output
+	  ./twingdb <all the options you want> >& out
+	  all the input received from the shell will be executed and printed to the \"out\" file
+	  - attach the debugger at a specific point during execution. You do this by specifying the PIDs
+	  instead of the executables:
+	  ./twingdb -i 11111 -I 22222 -p ~/Documents/test.ang -a \"-project ~/Documents/test.ang -target 2404 -cmd execute\" -f CarFollowing.cxx -l  83 -L 80 -v '*pVarVeh' -V '*pVarVeh'
+"
+
+while getopts ':e:E:p:a:f:l:L:v:V:i:I:h' OPT; do
+	case "$OPT" in
+		h)
+			printf "$HELP" >&1
+			exit
+			;;
+		e)
+			EXE1=$OPTARG
+			;;
+		E)
+			EXE2=$OPTARG
+			;;
+		a)
+			ARGS=$OPTARG
+			;;
+		f)
+			FILE=$OPTARG
+			;;
+		l)
+			LINE1=$OPTARG
+			;;
+		L)
+			LINE2=$OPTARG
+			;;
+		v)
+			VALUE1=$OPTARG
+			;;
+		V)
+			VALUE2=$OPTARG
+			;;
+		i)
+			PROCID1=$OPTARG
+			;;
+		I)
+			PROCID2=$OPTARG
+			;;
+		\?)
+			echo "invalid opotion -$OPTARG" >&2
+			exit
+	esac
+done
+
+if [[ -z "${TWINGDBPATH}" ]] ; then
+TWINGDBPATH=$PWD
+echo "warning: automatically set the TWINGDBPATH variable to 
+$TWINGDB
+ enviromnent variable TWINGDBPATH to point to where twingdb is located"
+fi
+
+#they have to be both there (1 and 2)
+if [[ (! -z "$EXE1"  ||  ! -z "$EXE2")  &&  (! -z "$PROCID2" ||  ! -z "$PROCID2") ]] ; then
+   echo "malformed arguments: you either specify -e and -E or -i and -I" >&2
+   exit
+fi
+
+#there must be at least one
+if [[ (-z "$EXE1"  ||  -z "$EXE2")  &&  (-z "$PROCID2" ||  -z "$PROCID2") ]] ; then
+   echo "malformed arguments: you have to specify obh -e and -E, or -i and -I" >&2
+   exit
+fi
+
+if [[ ! -z "$EXE1"  &&  ! -z "$EXE2" && ! -z "$FILE"  &&  ! -z "$LINE1"  &&  ! -z "$LINE2"  &&  ! -z "$VALUE1"  &&  ! -z "$VALUE2"  &&  -z "$PROCID1" &&  -z "$PROCID2" ]] ; then
+sed -e "s|__VALUE_1|$VALUE1|g" $TWINGDBPATH/compare.gdb.template > ~/.compare.gdb
+sed -i -e "s|__VALUE_2|$VALUE2|g" ~/.compare.gdb
+
+printf "executing:\n
+gdb -quiet \"$EXE1\" \\n
+	     -ex \"pi import sys\" \\n
+         -ex \"pi sys.path.append(\\\"$TWINGDBPATH/python\\\")\" \\n
+	     -ex \"add-inferior -exec \\\"$EXE2\\\"\"  \\n
+		 -ex \"set schedule-multiple off\" \\n
+		 -ex \"source ~/.compare.gdb\" \\n
+		 -ex \"pi import compare\" \\n
+		 -ex \"set target-async on\" \\n
+		 -ex \"set non-stop on\" \\n
+		 -ex \"set pagination off\" \\n
+		 -ex \"set breakpoint pending on\" \\n
+		 -ex \"inferior 1\" \\n
+		 -ex \"run $ARGS &\" \\n
+		 -ex \"inferior 2\" \\n
+		 -ex \"run $ARGS &\" \\n
+		 -ex \"set print symbol-loading off\" \\n
+		 -ex \"set logging on\" \\n
+		 -ex \"set logging redirect on\" \\n
+		 -ex \"set logging overwrite on\" \\n
+		 -ex \"set print pretty\" \\n
+		 -ex \"set print thread-events off\" \\n
+		 -ex \"set print inferior-events off\" \\n
+		 -ex \"c_compare_continue $FILE  $LINE1 $LINE2 $VALUE1 $VALUE2\"\n
+" >&1
+
+gdb -quiet "$EXE1" \
+	     -ex "pi import sys" \
+         -ex "pi sys.path.append(\"$TWINGDBPATH/python\")" \
+	     -ex "add-inferior -exec \"$EXE2\""  \
+		 -ex "set schedule-multiple off" \
+		 -ex "source ~/.compare.gdb" \
+		 -ex "pi import compare" \
+		 -ex "set target-async on" \
+		 -ex "set non-stop on" \
+		 -ex "set pagination off" \
+		 -ex "set breakpoint pending on" \
+		 -ex "inferior 1" \
+		 -ex "run $ARGS &" \
+		 -ex "inferior 2" \
+		 -ex "run $ARGS &" \
+		 -ex "set print symbol-loading off" \
+		 -ex "set logging on" \
+		 -ex "set logging redirect on" \
+		 -ex "set logging overwrite on" \
+		 -ex "set print pretty" \
+		 -ex "set print thread-events off" \
+		 -ex "set print inferior-events off" \
+		 -ex "c_compare_continue $FILE  $LINE1 $LINE2 $VALUE1 $VALUE2"
+
+#cleanup
+rm ~/.compare.gdb
+
+else
+if [[ ! -z "$EXE1"  &&  ! -z "$EXE2"  &&  ! -z "$FILE"  ||  ! -z "$LINE1"  ||  -z "$LINE2"  ||  ! -z "$VALUE1"  ||  ! -z "$VALUE2" ]] ; then
+echo "warning: malformed command. run
+twingdb -h
+for help. Only the -e, -E, -a options will be taken into account" >&2
+
+printf "executing:\n
+gdb -quiet \"$EXE1\" \\n
+	     -ex \"pi import sys\" \\n
+         -ex \"pi sys.path.append(\'$TWINGDBPATH/python\')\" \\n
+	     -ex \"add-inferior -exec $EXE2\"  \\n
+		 -ex \"set schedule-multiple off\" \\n
+		 -ex \"source ~/.compare.gdb\" \\n
+		 -ex \"pi import compare\" \\n
+		 -ex \"set target-async on\" \\n
+		 -ex \"set non-stop on\" \\n
+		 -ex \"set pagination off\" \\n
+		 -ex \"set breakpoint pending on\" \\n
+		 -ex \"inferior 1\" \\n
+		 -ex \"run $ARGS &\" \\n
+		 -ex \"inferior 2\" \\n
+		 -ex \"run $ARGS &\" \\n
+		 -ex \"set print symbol-loading off\" \\n
+		 -ex \"set logging on\" \\n
+		 -ex \"set logging redirect on\" \\n
+		 -ex \"set logging overwrite on\" \\n
+		 -ex \"set print pretty\" \\n
+		 -ex \"set print thread-events off\" \\n
+		 -ex \"set print inferior-events off\"\n
+" >&1
+
+gdb -quiet "$EXE1" \
+	     -ex "pi import sys" \
+         -ex "pi sys.path.append(\'$TWINGDBPATH/python\')" \
+	     -ex "add-inferior -exec $EXE2"  \
+		 -ex "set schedule-multiple off" \
+		 -ex "source ~/.compare.gdb" \
+		 -ex "pi import compare" \
+		 -ex "set target-async on" \
+		 -ex "set non-stop on" \
+		 -ex "set pagination off" \
+		 -ex "set breakpoint pending on" \
+		 -ex "inferior 1" \
+		 -ex "run $ARGS &" \
+		 -ex "inferior 2" \
+		 -ex "run $ARGS &" \
+		 -ex "set print symbol-loading off" \
+		 -ex "set logging on" \
+		 -ex "set logging redirect on" \
+		 -ex "set logging overwrite on" \
+		 -ex "set print pretty" \
+		 -ex "set print thread-events off" \
+		 -ex "set print inferior-events off"
+
+else
+if [[ -z "$EXE1"  && -z "$EXE2" && ! -z "$FILE"  &&  ! -z "$LINE1"  &&  ! -z "$LINE2"  &&  ! -z "$VALUE1"  &&  ! -z "$VALUE2"  &&  ! -z "$PROCID1" &&  ! -z "$PROCID2" ]] ; then
+sed -e "s|__VALUE_1|$VALUE1|g" compare.gdb.template > .compare.gdb
+sed -i -e "s|__VALUE_2|$VALUE2|g" .compare.gdb
+
+printf "executiong:\n
+gdb -quiet \\n
+	     -ex \"pi import sys\" \\n
+         -ex \"pi sys.path.append(\'$TWINGDBPATH/python\')\" \\n
+	     -ex \"attach $PROCID1\"  \\n
+	     -ex \"add-inferior\"  \\n
+	     -ex \"inferior 2\"  \\n
+	     -ex \"attach $PROCID2\"  \\n
+	     -ex \"inferior 1\"  \\n
+		 -ex \"set schedule-multiple off\" \\n
+		 -ex \"source ~/.compare.gdb\" \\n
+		 -ex \"pi import compare\" \\n
+		 -ex \"set target-async on\" \\n
+		 -ex \"set non-stop on\" \\n
+		 -ex \"set pagination off\" \\n
+		 -ex \"set breakpoint pending on\" \\n
+		 -ex \"inferior 1\" \\n
+		 -ex \"run $ARGS &\" \\n
+		 -ex \"inferior 2\" \\n
+		 -ex \"run $ARGS &\" \\n
+		 -ex \"set print symbol-loading off\" \\n
+		 -ex \"set logging on\" \\n
+		 -ex \"set logging redirect on\" \\n
+		 -ex \"set logging overwrite on\" \\n
+		 -ex \"set print pretty\" \\n
+		 -ex \"set print thread-events off\" \\n
+		 -ex \"set print inferior-events off\" \\n
+		 -ex \"c_compare_continue $FILE  $LINE1 $LINE2 $VALUE1 $VALUE2\"\n
+" >&1
+
+gdb -quiet \
+	     -ex "pi import sys" \
+         -ex "pi sys.path.append(\'$TWINGDBPATH/python\')" \
+	     -ex "attach $PROCID1"  \
+	     -ex "add-inferior"  \
+	     -ex "inferior 2"  \
+	     -ex "attach $PROCID2"  \
+	     -ex "inferior 1"  \
+		 -ex "set schedule-multiple off" \
+		 -ex "source ~/.compare.gdb" \
+		 -ex "pi import compare" \
+		 -ex "set target-async on" \
+		 -ex "set non-stop on" \
+		 -ex "set pagination off" \
+		 -ex "set breakpoint pending on" \
+		 -ex "inferior 1" \
+		 -ex "run $ARGS &" \
+		 -ex "inferior 2" \
+		 -ex "run $ARGS &" \
+		 -ex "set print symbol-loading off" \
+		 -ex "set logging on" \
+		 -ex "set logging redirect on" \
+		 -ex "set logging overwrite on" \
+		 -ex "set print pretty" \
+		 -ex "set print thread-events off" \
+		 -ex "set print inferior-events off" \
+		 -ex "c_compare_continue $FILE  $LINE1 $LINE2 $VALUE1 $VALUE2"
+
+#cleanup
+rm ~/.compare.gdb
+
+fi
+fi
+fi
